@@ -138,3 +138,4 @@ Agregar en el frontend:
 # frontend/.env
 VITE_API_URL=http://localhost:3001
 ```
+<!-- deploy -->
