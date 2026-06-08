@@ -4,10 +4,11 @@ const pool = require('../src/db/pool');
 async function addArgentina() {
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
-
-    // Agregar Argentina al ENUM
+// ENUM debe modificarse FUERA de una transacción
     await client.query(`ALTER TYPE country_code ADD VALUE IF NOT EXISTS 'Argentina'`);
+    console.log('✅ ENUM actualizado');
+
+    await client.query('BEGIN');
 
     // Crear usuario Admin RRHH Argentina
     const bcrypt = require('bcryptjs');
