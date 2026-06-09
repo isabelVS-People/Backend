@@ -75,7 +75,7 @@ router.post('/employees', upload.single('file'), async (req, res, next) => {
             continue;
           }
 
-          // Buscar rol
+          // Buscar rol agrego
           const roleResult = await client.query(
             'SELECT id FROM roles WHERE LOWER(name) = LOWER($1)', [roleName]
           );
