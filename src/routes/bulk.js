@@ -287,7 +287,7 @@ router.post('/employees', upload.single('file'), async (req, res, next) => {
             results.skipped++;
             continue;
           }
-          if (!['Chile', 'Colombia', 'Perú'].includes(country)) {
+          if (!['Chile', 'Colombia', 'Perú', 'Argentina'].includes(country)) {
             results.errors.push({ row: rowNum, error: `País inválido: ${country}` });
             results.skipped++;
             continue;
