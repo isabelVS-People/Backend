@@ -3,7 +3,7 @@ const pool = require('../db/pool');
 const { authenticate, requireRole, requireSameTeam } = require('../middleware/auth');
 
 const router = express.Router();
-router.use(authenticate);
+// router.use(authenticate);
 
 /**
  * GET /api/employees
