@@ -12,7 +12,7 @@ const { authenticate, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 // Auth deshabilitada temporalmente para demo-repuesta
-router.use((req, res, next) => { req.user = { userId: 1, role: 'admin_rrhh', country: 'Chile' }; next(); });
+router.use((req, res, next) => { req.user = { userId: 1, role: 'admin_rrhh', country: 'Argentina' }; next(); });
 
 const upload = multer({
   storage: multer.memoryStorage(),
