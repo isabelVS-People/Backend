@@ -3,7 +3,7 @@ const pool = require('../db/pool');
 const { authenticate, requireRole, requireSameTeam } = require('../middleware/auth');
 
 const router = express.Router();
-router.use(authenticate); // JWT real — país y rol vienen del token
+router.use(authenticate);
 
 router.get('/', requireRole('lider', 'admin_rrhh'), async (req, res, next) => {
   try {
@@ -20,11 +20,14 @@ router.get('/', requireRole('lider', 'admin_rrhh'), async (req, res, next) => {
       SELECT e.id, e.name, e.email, e.area, e.current_level, e.country,
         e.role_id, r.name AS role_name,
         rf.id AS family_id, rf.name AS family_name,
-        e.leader_id, u.name AS leader_name, e.created_at
+        e.leader_id, lu.name AS leader_name,
+        eu.role AS user_role,
+        e.created_at
       FROM employees e
       LEFT JOIN roles r ON e.role_id = r.id
       LEFT JOIN role_families rf ON r.family_id = rf.id
-      LEFT JOIN users u ON e.leader_id = u.id
+      LEFT JOIN users lu ON e.leader_id = lu.id
+      LEFT JOIN users eu ON eu.email = e.email
       WHERE ${conditions.join(' AND ')}
       ORDER BY e.name ASC`;
     const result = await pool.query(sql, params);
