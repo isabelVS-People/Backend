@@ -18,6 +18,15 @@ const upload = multer({
 
 const PAISES_VALIDOS = ['chile', 'colombia', 'peru', 'perú', 'argentina'];
 
+// Mapea el país normalizado (sin tildes, minúsculas) al valor exacto del ENUM country_code
+const PAIS_ENUM_MAP = {
+  chile: 'Chile',
+  colombia: 'Colombia',
+  peru: 'Perú',
+  'perú': 'Perú',
+  argentina: 'Argentina',
+};
+
 router.post('/employees', requireRole('admin_rrhh'), upload.single('file'), async (req, res, next) => {
   if (!req.file) return res.status(400).json({ error: 'Archivo requerido' });
   try {
@@ -29,30 +38,50 @@ router.post('/employees', requireRole('admin_rrhh'), upload.single('file'), asyn
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
         const rowNum = i + 2;
+
+        // SAVEPOINT por fila: si esta fila falla, hacemos ROLLBACK solo
+        // hasta acá y seguimos con las siguientes, sin abortar toda la transacción.
+        await client.query('SAVEPOINT row_sp');
         try {
           const name = row['nombre'] || row['name'];
           const email = (row['email'] || '').toLowerCase().trim();
           const area = row['area'] || row['área'];
-          const country = (row['pais'] || row['país'] || row['country'] || '').trim();
+          const countryRaw = (row['pais'] || row['país'] || row['country'] || '').trim();
           const roleName = row['rol'] || row['role'];
           const level = parseInt(row['nivel'] || row['level']);
-          if (!name || !email || !area || !country || !roleName || !level) {
+
+          if (!name || !email || !area || !countryRaw || !roleName || !level) {
             results.errors.push({ row: rowNum, error: 'Campos incompletos', data: row });
-            results.skipped++; continue;
+            results.skipped++;
+            await client.query('ROLLBACK TO SAVEPOINT row_sp');
+            continue;
           }
-          if (!PAISES_VALIDOS.includes(country.toLowerCase())) {
-            results.errors.push({ row: rowNum, error: `País inválido: ${country}` });
-            results.skipped++; continue;
+
+          const countryKey = countryRaw.toLowerCase();
+          if (!PAISES_VALIDOS.includes(countryKey)) {
+            results.errors.push({ row: rowNum, error: `País inválido: ${countryRaw}` });
+            results.skipped++;
+            await client.query('ROLLBACK TO SAVEPOINT row_sp');
+            continue;
           }
+          // Normalizar al valor exacto que espera el ENUM country_code (con tilde/capitalización correcta)
+          const country = PAIS_ENUM_MAP[countryKey];
+
           if (level < 1 || level > 5) {
             results.errors.push({ row: rowNum, error: `Nivel inválido: ${level}` });
-            results.skipped++; continue;
+            results.skipped++;
+            await client.query('ROLLBACK TO SAVEPOINT row_sp');
+            continue;
           }
+
           const roleResult = await client.query('SELECT id FROM roles WHERE LOWER(name) = LOWER($1)', [roleName]);
           if (!roleResult.rows.length) {
             results.errors.push({ row: rowNum, error: `Rol no encontrado: ${roleName}` });
-            results.skipped++; continue;
+            results.skipped++;
+            await client.query('ROLLBACK TO SAVEPOINT row_sp');
+            continue;
           }
+
           await client.query(
             `INSERT INTO employees (name, email, area, role_id, current_level, country)
              VALUES ($1,$2,$3,$4,$5,$6)
@@ -61,8 +90,13 @@ router.post('/employees', requireRole('admin_rrhh'), upload.single('file'), asyn
                role_id=EXCLUDED.role_id, current_level=EXCLUDED.current_level`,
             [name, email, area, roleResult.rows[0].id, level, country]
           );
+          await client.query('RELEASE SAVEPOINT row_sp');
           results.inserted++;
-        } catch (rowErr) { results.errors.push({ row: rowNum, error: rowErr.message }); results.skipped++; }
+        } catch (rowErr) {
+          await client.query('ROLLBACK TO SAVEPOINT row_sp');
+          results.errors.push({ row: rowNum, error: rowErr.message });
+          results.skipped++;
+        }
       }
       await client.query('COMMIT');
       res.json({ total: rows.length, inserted: results.inserted, skipped: results.skipped, errors: results.errors.slice(0, 50) });
@@ -80,11 +114,16 @@ router.post('/roles', requireRole('admin_rrhh'), upload.single('file'), async (r
       await client.query('BEGIN');
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i]; const rowNum = i + 2;
+        await client.query('SAVEPOINT row_sp');
         try {
           const familyName = row['familia'], roleName = row['rol'];
           const level = parseInt(row['nivel']);
           const description = row['descripcion'] || row['descripción'];
-          if (!familyName || !roleName || !level || !description) { results.errors.push({ row: rowNum, error: 'Campos incompletos' }); continue; }
+          if (!familyName || !roleName || !level || !description) {
+            results.errors.push({ row: rowNum, error: 'Campos incompletos' });
+            await client.query('ROLLBACK TO SAVEPOINT row_sp');
+            continue;
+          }
           const fam = await client.query(
             'INSERT INTO role_families(name) VALUES($1) ON CONFLICT(name) DO UPDATE SET name=EXCLUDED.name RETURNING id', [familyName]
           );
@@ -97,8 +136,12 @@ router.post('/roles', requireRole('admin_rrhh'), upload.single('file'), async (r
              ON CONFLICT(role_id, level) DO UPDATE SET description=EXCLUDED.description`,
             [rol.rows[0].id, level, description]
           );
+          await client.query('RELEASE SAVEPOINT row_sp');
           results.inserted++;
-        } catch (rowErr) { results.errors.push({ row: rowNum, error: rowErr.message }); }
+        } catch (rowErr) {
+          await client.query('ROLLBACK TO SAVEPOINT row_sp');
+          results.errors.push({ row: rowNum, error: rowErr.message });
+        }
       }
       await client.query('COMMIT');
       res.json({ total: rows.length, inserted: results.inserted, errors: results.errors.slice(0, 50) });
