@@ -1,116 +1,82 @@
-const express = require('express');
-const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const pool = require('../db/pool');
-
-const router = express.Router();
 
 /**
- * POST /api/auth/login
- * Login demo (solo desarrollo). En producción reemplazar por SSO.
- * Body: { email, password }
+ * Verifica el JWT y adjunta { userId, role, country, isGlobalAdmin } a req.user.
+ * El country NUNCA se acepta del body/query; siempre del token.
  */
-router.post('/login', async (req, res, next) => {
-  try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email y contraseña requeridos' });
-    }
-
-    const result = await pool.query(
-      'SELECT id, name, email, password_hash, role, country FROM users WHERE email = $1',
-      [email.toLowerCase().trim()]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(401).json({ error: 'Credenciales inválidas' });
-    }
-
-    const user = result.rows[0];
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) {
-      return res.status(401).json({ error: 'Credenciales inválidas' });
-    }
-
-    const token = jwt.sign(
-      { userId: user.id, role: user.role, country: user.country },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
-    );
-
-    res.json({
-      token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role, country: user.country },
-    });
-  } catch (err) {
-    next(err);
+function authenticate(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Token de autenticación requerido' });
   }
-});
+
+  const token = authHeader.slice(7);
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = {
+      userId: payload.userId,
+      role: payload.role,
+      country: payload.country,
+      isGlobalAdmin: payload.role === 'super_admin_rrhh',
+    };
+    next();
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Sesión expirada. Volvé a iniciar sesión.' });
+    }
+    return res.status(401).json({ error: 'Token inválido' });
+  }
+}
 
 /**
- * POST /api/auth/sso
- * Endpoint para recibir el token del Identity Provider (Okta, Azure AD, Google Workspace, etc.)
- * El IdP redirige aquí con un id_token. Validamos, obtenemos el usuario de nuestra DB,
- * y emitimos nuestro propio JWT con { userId, role, country }.
- *
- * En producción: validar la firma del id_token con las claves públicas del IdP (JWKS).
- * Por ahora: stub documentado para integrar.
+ * requireRole('admin_rrhh') o requireRole('lider', 'admin_rrhh')
+ * Siempre usar DESPUÉS de authenticate.
+ * super_admin_rrhh siempre pasa, sin necesidad de listarlo explícitamente,
+ * salvo que la lista de roles permitidos esté vacía (caso no esperado).
  */
-router.post('/sso', async (req, res, next) => {
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ error: 'No autenticado' });
+    if (req.user.role === 'super_admin_rrhh') return next();
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({
+        error: `Acceso denegado. Se requiere rol: ${roles.join(' o ')}`,
+      });
+    }
+    next();
+  };
+}
+
+/**
+ * Valida que el líder solo acceda a colaboradores de su propio equipo y país.
+ * admin_rrhh y super_admin_rrhh acceden sin restricción.
+ * Usar en rutas donde se recibe :employeeId como parámetro.
+ */
+async function requireSameTeam(req, res, next) {
+  if (req.user.role === 'admin_rrhh' || req.user.role === 'super_admin_rrhh') return next();
+
+  const pool = require('../db/pool');
+  const { employeeId } = req.params;
+
   try {
-    const { idToken } = req.body;
-    if (!idToken) return res.status(400).json({ error: 'idToken requerido' });
-
-    // TODO: validar idToken con librería como 'openid-client' o 'passport-openidconnect'
-    // Ejemplo con openid-client:
-    //   const client = await getOidcClient();
-    //   const tokenSet = await client.callback(redirectUri, { id_token: idToken });
-    //   const claims = tokenSet.claims();
-    //   const email = claims.email;
-
-    // Stub: decodificar sin verificar (SOLO DEMO)
-    const decoded = jwt.decode(idToken);
-    if (!decoded?.email) return res.status(400).json({ error: 'Token SSO inválido' });
-
     const result = await pool.query(
-      'SELECT id, name, email, role, country FROM users WHERE email = $1',
-      [decoded.email.toLowerCase()]
+      'SELECT leader_id, country FROM employees WHERE id = $1',
+      [parseInt(employeeId)]
     );
     if (result.rows.length === 0) {
-      return res.status(403).json({ error: 'Usuario no registrado en el sistema' });
+      return res.status(404).json({ error: 'Colaborador no encontrado' });
     }
-
-    const user = result.rows[0];
-    const token = jwt.sign(
-      { userId: user.id, role: user.role, country: user.country },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
-    );
-
-    res.json({
-      token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role, country: user.country },
-    });
+    const emp = result.rows[0];
+    if (emp.country !== req.user.country) {
+      return res.status(403).json({ error: 'Acceso denegado: país diferente' });
+    }
+    if (req.user.role === 'lider' && emp.leader_id !== req.user.userId) {
+      return res.status(403).json({ error: 'Acceso denegado: colaborador fuera de tu equipo' });
+    }
+    next();
   } catch (err) {
     next(err);
   }
-});
+}
 
-/**
- * GET /api/auth/me
- * Devuelve el usuario autenticado actual (para rehidratar sesión al refrescar).
- */
-router.get('/me', require('../middleware/auth').authenticate, async (req, res, next) => {
-  try {
-    const result = await pool.query(
-      'SELECT id, name, email, role, country FROM users WHERE id = $1',
-      [req.user.userId]
-    );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Usuario no encontrado' });
-    res.json(result.rows[0]);
-  } catch (err) {
-    next(err);
-  }
-});
-
-module.exports = router;
+module.exports = { authenticate, requireRole, requireSameTeam };

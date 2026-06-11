@@ -7,15 +7,25 @@ router.use(authenticate);
 
 router.get('/', requireRole('lider', 'admin_rrhh'), async (req, res, next) => {
   try {
-    const { area, role_id, level } = req.query;
-    const { country, role, userId } = req.user;
-    const conditions = ['e.country = $1'];
-    const params = [country];
-    let idx = 2;
+    const { area, role_id, level, country: countryFilter } = req.query;
+    const { country, role, userId, isGlobalAdmin } = req.user;
+    const conditions = [];
+    const params = [];
+    let idx = 1;
+
+    if (isGlobalAdmin) {
+      // super_admin_rrhh: ve todos los países, salvo que filtre uno explícitamente
+      if (countryFilter) { conditions.push(`e.country = $${idx++}`); params.push(countryFilter); }
+    } else {
+      conditions.push(`e.country = $${idx++}`); params.push(country);
+    }
+
     if (role === 'lider') { conditions.push(`e.leader_id = $${idx++}`); params.push(userId); }
     if (area) { conditions.push(`e.area = $${idx++}`); params.push(area); }
     if (role_id) { conditions.push(`e.role_id = $${idx++}`); params.push(parseInt(role_id)); }
     if (level) { conditions.push(`e.current_level = $${idx++}`); params.push(parseInt(level)); }
+
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const sql = `
       SELECT e.id, e.name, e.email, e.area, e.current_level, e.country,
         e.role_id, r.name AS role_name,
@@ -28,8 +38,8 @@ router.get('/', requireRole('lider', 'admin_rrhh'), async (req, res, next) => {
       LEFT JOIN role_families rf ON r.family_id = rf.id
       LEFT JOIN users lu ON e.leader_id = lu.id
       LEFT JOIN users eu ON eu.email = e.email
-      WHERE ${conditions.join(' AND ')}
-      ORDER BY e.name ASC`;
+      ${whereClause}
+      ORDER BY e.country ASC, e.name ASC`;
     const result = await pool.query(sql, params);
     res.json(result.rows);
   } catch (err) { next(err); }
@@ -56,13 +66,18 @@ router.get('/me', requireRole('colaborador'), async (req, res, next) => {
 
 router.get('/:employeeId', requireRole('lider', 'admin_rrhh'), requireSameTeam, async (req, res, next) => {
   try {
+    const { isGlobalAdmin, country } = req.user;
+    const conditions = ['e.id = $1'];
+    const params = [req.params.employeeId];
+    if (!isGlobalAdmin) { conditions.push('e.country = $2'); params.push(country); }
+
     const result = await pool.query(
       `SELECT e.*, r.name AS role_name, rf.name AS family_name
        FROM employees e
        LEFT JOIN roles r ON e.role_id = r.id
        LEFT JOIN role_families rf ON r.family_id = rf.id
-       WHERE e.id = $1 AND e.country = $2`,
-      [req.params.employeeId, req.user.country]
+       WHERE ${conditions.join(' AND ')}`,
+      params
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Colaborador no encontrado' });
     res.json(result.rows[0]);
@@ -74,11 +89,17 @@ router.patch('/:employeeId', requireRole('lider', 'admin_rrhh'), requireSameTeam
   try {
     const { employeeId } = req.params;
     const { role_id, current_level } = req.body;
+    const { isGlobalAdmin, country } = req.user;
     if (!role_id && !current_level) return res.status(400).json({ error: 'Se requiere role_id o current_level' });
     await client.query('BEGIN');
+
+    const conditions = ['id = $1'];
+    const params = [employeeId];
+    if (!isGlobalAdmin) { conditions.push('country = $2'); params.push(country); }
+
     const current = await client.query(
-      'SELECT role_id, current_level FROM employees WHERE id = $1 AND country = $2 FOR UPDATE',
-      [employeeId, req.user.country]
+      `SELECT role_id, current_level, country FROM employees WHERE ${conditions.join(' AND ')} FOR UPDATE`,
+      params
     );
     if (current.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Colaborador no encontrado' }); }
     const prev = current.rows[0];
@@ -89,7 +110,7 @@ router.patch('/:employeeId', requireRole('lider', 'admin_rrhh'), requireSameTeam
     await client.query(
       `INSERT INTO change_history (employee_id, changed_by_id, previous_role_id, new_role_id, previous_level, new_level, country)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [employeeId, req.user.userId, prev.role_id, newRoleId, prev.current_level, newLevel, req.user.country]
+      [employeeId, req.user.userId, prev.role_id, newRoleId, prev.current_level, newLevel, prev.country]
     );
     await client.query('COMMIT');
     const updated = await pool.query(
@@ -105,11 +126,11 @@ router.patch('/:employeeId', requireRole('lider', 'admin_rrhh'), requireSameTeam
 router.get('/:employeeId/history', authenticate, async (req, res, next) => {
   try {
     const { employeeId } = req.params;
-    const { country, role, userId } = req.user;
+    const { country, role, userId, isGlobalAdmin } = req.user;
     const emp = await pool.query('SELECT leader_id, country, email FROM employees WHERE id = $1', [parseInt(employeeId)]);
     if (emp.rows.length === 0) return res.status(404).json({ error: 'Colaborador no encontrado' });
     const e = emp.rows[0];
-    if (e.country !== country) return res.status(403).json({ error: 'Acceso denegado' });
+    if (!isGlobalAdmin && e.country !== country) return res.status(403).json({ error: 'Acceso denegado' });
     if (role === 'colaborador') {
       const me = await pool.query('SELECT email FROM users WHERE id = $1', [userId]);
       if (me.rows[0]?.email !== e.email) return res.status(403).json({ error: 'Solo podés ver tu propio historial' });
@@ -123,7 +144,7 @@ router.get('/:employeeId/history', authenticate, async (req, res, next) => {
        LEFT JOIN roles nr ON ch.new_role_id = nr.id
        LEFT JOIN users u ON ch.changed_by_id = u.id
        WHERE ch.employee_id = $1 AND ch.country = $2 ORDER BY ch.change_date DESC`,
-      [employeeId, country]
+      [employeeId, e.country]
     );
     res.json(result.rows);
   } catch (err) { next(err); }
