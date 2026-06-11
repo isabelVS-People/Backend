@@ -1,82 +1,89 @@
+const express = require('express');
+const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const pool = require('../db/pool');
+
+const router = express.Router();
 
 /**
- * Verifica el JWT y adjunta { userId, role, country, isGlobalAdmin } a req.user.
- * El country NUNCA se acepta del body/query; siempre del token.
+ * POST /api/auth/login
+ * Body: { email, password }
+ * Devuelve { token, user: { id, name, email, role, country } }
  */
-function authenticate(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Token de autenticación requerido' });
-  }
-
-  const token = authHeader.slice(7);
+router.post('/login', async (req, res, next) => {
   try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email y contraseña requeridos' });
+    }
+
+    const result = await pool.query(
+      'SELECT id, name, email, password_hash, role, country FROM users WHERE email = $1',
+      [email.toLowerCase().trim()]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: 'Email o contraseña incorrectos' });
+    }
+
+    const user = result.rows[0];
+    const match = await bcrypt.compare(password, user.password_hash);
+    if (!match) {
+      return res.status(401).json({ error: 'Email o contraseña incorrectos' });
+    }
+
+    const token = jwt.sign(
+      { userId: user.id, role: user.role, country: user.country },
+      process.env.JWT_SECRET,
+      { expiresIn: '12h' }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        country: user.country,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/auth/me
+ * Requiere header Authorization: Bearer <token>
+ * Devuelve los datos del usuario autenticado.
+ */
+router.get('/me', async (req, res, next) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Token de autenticación requerido' });
+    }
+    const token = authHeader.slice(7);
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = {
-      userId: payload.userId,
-      role: payload.role,
-      country: payload.country,
-      isGlobalAdmin: payload.role === 'super_admin_rrhh',
-    };
-    next();
+
+    const result = await pool.query(
+      'SELECT id, name, email, role, country FROM users WHERE id = $1',
+      [payload.userId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+    res.json({ user: result.rows[0] });
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
       return res.status(401).json({ error: 'Sesión expirada. Volvé a iniciar sesión.' });
     }
-    return res.status(401).json({ error: 'Token inválido' });
-  }
-}
-
-/**
- * requireRole('admin_rrhh') o requireRole('lider', 'admin_rrhh')
- * Siempre usar DESPUÉS de authenticate.
- * super_admin_rrhh siempre pasa, sin necesidad de listarlo explícitamente,
- * salvo que la lista de roles permitidos esté vacía (caso no esperado).
- */
-function requireRole(...roles) {
-  return (req, res, next) => {
-    if (!req.user) return res.status(401).json({ error: 'No autenticado' });
-    if (req.user.role === 'super_admin_rrhh') return next();
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({
-        error: `Acceso denegado. Se requiere rol: ${roles.join(' o ')}`,
-      });
+    if (err.name === 'JsonWebTokenError') {
+      return res.status(401).json({ error: 'Token inválido' });
     }
-    next();
-  };
-}
-
-/**
- * Valida que el líder solo acceda a colaboradores de su propio equipo y país.
- * admin_rrhh y super_admin_rrhh acceden sin restricción.
- * Usar en rutas donde se recibe :employeeId como parámetro.
- */
-async function requireSameTeam(req, res, next) {
-  if (req.user.role === 'admin_rrhh' || req.user.role === 'super_admin_rrhh') return next();
-
-  const pool = require('../db/pool');
-  const { employeeId } = req.params;
-
-  try {
-    const result = await pool.query(
-      'SELECT leader_id, country FROM employees WHERE id = $1',
-      [parseInt(employeeId)]
-    );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Colaborador no encontrado' });
-    }
-    const emp = result.rows[0];
-    if (emp.country !== req.user.country) {
-      return res.status(403).json({ error: 'Acceso denegado: país diferente' });
-    }
-    if (req.user.role === 'lider' && emp.leader_id !== req.user.userId) {
-      return res.status(403).json({ error: 'Acceso denegado: colaborador fuera de tu equipo' });
-    }
-    next();
-  } catch (err) {
     next(err);
   }
-}
+});
 
-module.exports = { authenticate, requireRole, requireSameTeam };
+module.exports = router;

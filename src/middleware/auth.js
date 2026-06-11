@@ -1,7 +1,7 @@
 const jwt = require('jsonwebtoken');
 
 /**
- * Verifica el JWT y adjunta { userId, role, country } a req.user.
+ * Verifica el JWT y adjunta { userId, role, country, isGlobalAdmin } a req.user.
  * El country NUNCA se acepta del body/query; siempre del token.
  */
 function authenticate(req, res, next) {
@@ -17,6 +17,7 @@ function authenticate(req, res, next) {
       userId: payload.userId,
       role: payload.role,
       country: payload.country,
+      isGlobalAdmin: payload.role === 'super_admin_rrhh',
     };
     next();
   } catch (err) {
@@ -30,10 +31,13 @@ function authenticate(req, res, next) {
 /**
  * requireRole('admin_rrhh') o requireRole('lider', 'admin_rrhh')
  * Siempre usar DESPUÉS de authenticate.
+ * super_admin_rrhh siempre pasa, sin necesidad de listarlo explícitamente,
+ * salvo que la lista de roles permitidos esté vacía (caso no esperado).
  */
 function requireRole(...roles) {
   return (req, res, next) => {
     if (!req.user) return res.status(401).json({ error: 'No autenticado' });
+    if (req.user.role === 'super_admin_rrhh') return next();
     if (!roles.includes(req.user.role)) {
       return res.status(403).json({
         error: `Acceso denegado. Se requiere rol: ${roles.join(' o ')}`,
@@ -45,10 +49,11 @@ function requireRole(...roles) {
 
 /**
  * Valida que el líder solo acceda a colaboradores de su propio equipo y país.
+ * admin_rrhh y super_admin_rrhh acceden sin restricción.
  * Usar en rutas donde se recibe :employeeId como parámetro.
  */
 async function requireSameTeam(req, res, next) {
-  if (req.user.role === 'admin_rrhh') return next();
+  if (req.user.role === 'admin_rrhh' || req.user.role === 'super_admin_rrhh') return next();
 
   const pool = require('../db/pool');
   const { employeeId } = req.params;
