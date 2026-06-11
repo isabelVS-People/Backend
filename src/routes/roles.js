@@ -27,6 +27,30 @@ router.get('/:roleId/levels', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+/**
+ * GET /api/roles/families/:familyId/competencies
+ * Devuelve la matriz 5x5 de competencias x niveles para una familia,
+ * agrupada por competencia: [{ competency_name, levels: [{level, description}, ...5] }, ...]
+ */
+router.get('/families/:familyId/competencies', async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT competency_name, level, description
+       FROM family_competency_levels
+       WHERE family_id = $1
+       ORDER BY competency_name ASC, level ASC`,
+      [req.params.familyId]
+    );
+    const grouped = {};
+    for (const row of result.rows) {
+      if (!grouped[row.competency_name]) grouped[row.competency_name] = [];
+      grouped[row.competency_name].push({ level: row.level, description: row.description });
+    }
+    const competencies = Object.entries(grouped).map(([competency_name, levels]) => ({ competency_name, levels }));
+    res.json(competencies);
+  } catch (err) { next(err); }
+});
+
 router.post('/families', requireRole('admin_rrhh'), async (req, res, next) => {
   try {
     const { name } = req.body;
@@ -57,6 +81,27 @@ router.put('/:roleId/levels/:level', requireRole('admin_rrhh'), async (req, res,
       `INSERT INTO competency_levels(role_id, level, description) VALUES($1,$2,$3)
        ON CONFLICT(role_id, level) DO UPDATE SET description=EXCLUDED.description RETURNING *`,
       [parseInt(roleId), parseInt(level), description]
+    );
+    res.json(r.rows[0]);
+  } catch (err) { next(err); }
+});
+
+/**
+ * PUT /api/roles/families/:familyId/competencies/:competencyName/:level
+ * Edita la descripción de una competencia x nivel para una familia.
+ */
+router.put('/families/:familyId/competencies/:competencyName/:level', requireRole('admin_rrhh'), async (req, res, next) => {
+  try {
+    const { familyId, competencyName, level } = req.params;
+    const { description } = req.body;
+    if (!description) return res.status(400).json({ error: 'description requerida' });
+    const lvl = parseInt(level);
+    if (lvl < 1 || lvl > 5) return res.status(400).json({ error: 'Nivel entre 1 y 5' });
+    const r = await pool.query(
+      `INSERT INTO family_competency_levels(family_id, competency_name, level, description)
+       VALUES($1,$2,$3,$4)
+       ON CONFLICT(family_id, competency_name, level) DO UPDATE SET description=EXCLUDED.description RETURNING *`,
+      [parseInt(familyId), decodeURIComponent(competencyName), lvl, description]
     );
     res.json(r.rows[0]);
   } catch (err) { next(err); }
